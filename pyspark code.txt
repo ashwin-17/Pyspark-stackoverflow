@@ -1,0 +1,274 @@
+from pyspark.sql import functions as F
+from pyspark.sql import SparkSession
+from pyspark.ml.clustering import KMeans
+from pyspark.ml.evaluation import ClusteringEvaluator
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml import Pipeline
+import random
+
+spark = SparkSession \
+  .builder \
+  .master('yarn') \
+  .appName('spark-stackoverflow-questions') \
+  .getOrCreate()
+
+# Use the Cloud Storage bucket for temporary BigQuery export data used
+# by the connector. This assumes the Cloud Storage connector for
+# Hadoop is configured.
+bucket = spark.sparkContext._jsc.hadoopConfiguration().get(
+    'fs.gs.system.bucket')
+spark.conf.set('temporaryGcsBucket', bucket)
+
+# Load data from BigQuery.
+questions = spark.read.format('bigquery') \
+  .option('table', 'fh-bigquery.stackoverflow_archive.201906_posts_questions') \
+  .load()
+
+
+#Making of dummy variables
+tags={'.net',
+ 'akka',
+ 'amazon-web-services',
+ 'analytics',
+ 'apache-flink',
+ 'apache-kafka',
+ 'apache-kafka-streams',
+ 'apache-nifi',
+ 'apache-spark',
+ 'apache-spark-sql',
+ 'arima',
+ 'azure',
+ 'bigml',
+ 'blockchain',
+ 'bokeh',
+ 'c',
+ 'c#',
+ 'c++',
+ 'cassandra',
+ 'categorical-data',
+ 'classification',
+ 'cloudera',
+ 'clustering',
+ 'cnn',
+ 'cross-validation',
+ 'css',
+ 'data-analysis',
+ 'data-cleaning',
+ 'data-manipulation',
+ 'data-mining',
+ 'data-modeling',
+ 'data-munging',
+ 'data-science',
+ 'data-visualization',
+ 'data.table',
+ 'dataframe',
+ 'dataset',
+ 'datastax',
+ 'decision-tree',
+ 'deep-learning',
+ 'django',
+ 'dplyr',
+ 'excel',
+ 'excel-formula',
+ 'facet',
+ 'feature-engineering',
+ 'feature-selection',
+ 'geopandas',
+ 'ggmap',
+ 'ggplot2',
+ 'ggplotly',
+ 'google-analytics',
+ 'google-analytics-api',
+ 'google-cloud-platform',
+ 'gradient-descent',
+ 'hadoop',
+ 'hana',
+ 'hbase',
+ 'hdfs',
+ 'hive',
+ 'hiveql',
+ 'html',
+ 'ibm-cloud',
+ 'igraph',
+ 'impala',
+ 'java',
+ 'javascript',
+ 'jquery',
+ 'jupyter-lab',
+ 'jupyter-notebook',
+ 'k-means',
+ 'keras',
+ 'knn',
+ 'lstm',
+ 'lubridate',
+ 'machine-learning',
+ 'mapreduce',
+ 'matlab',
+ 'matplotlib',
+ 'mesos',
+ 'missing-data',
+ 'networkx',
+ 'neural-network',
+ 'nlp',
+ 'numpy',
+ 'objective-c',
+ 'octave',
+ 'pandas',
+ 'php',
+ 'plotly',
+ 'plotly-dash',
+ 'plyr',
+ 'powerbi',
+ 'predictive-modeling',
+ 'presto',
+ 'purrr',
+ 'pyspark',
+ 'pyspark-sql',
+ 'python',
+ 'r',
+ 'r-caret',
+ 'r-markdown',
+ 'r-plotly',
+ 'random-forest',
+ 'rdata',
+ 'readr',
+ 'regression',
+ 'reinforcement-learning',
+ 'rlang',
+ 'rmarkdown',
+ 'rmd',
+ 'rnn',
+ 'rstudio',
+ 'sample-data',
+ 'sas',
+ 'scala',
+ 'scikit-image',
+ 'scikit-learn',
+ 'scipy',
+ 'seaborn',
+ 'sentiment-analysis',
+ 'serverless',
+ 'shiny',
+ 'shinydashboard',
+ 'sklearn-pandas',
+ 'spark-streaming',
+ 'sparklyr',
+ 'sql',
+ 'sqoop',
+ 'statsmodels',
+ 'stringr',
+ 'structured-data',
+ 'supervised-learning',
+ 'svm',
+ 'tableau',
+ 'tensorflow',
+ 'tensorflow-datasets',
+ 'text-mining',
+ 'theano',
+ 'tidyr',
+ 'tidyverse',
+ 'time-series',
+ 'training-data',
+ 'unsupervised-learning',
+ 'vba',
+ 'visualization',
+ 'xgb',
+ 'xgboost',
+ 'xml',
+ 'yarn',
+ 'zoo'}
+
+#creating dummy variables for all the tags present
+exprs=[F.when( F.array_contains(F.split("tags",'\|'),tag),1).otherwise(0).alias(tag) for tag in tags]
+questions_filtered=questions.select("id","view_count","creation_date","answer_count","owner_user_id",*exprs)
+
+#cleaning the names of the tags
+newColumns = []
+problematic_chars = '#+,;{}()=-.'
+for column in questions_filtered.columns:
+    column = column.lower()
+    column = column.replace(' ', '_')
+    for c in problematic_chars:
+        column = column.replace(c, '_')
+    newColumns.append(column)
+q = questions_filtered.toDF(*newColumns)
+
+
+#Filtering to only those records which have at least 1 occurance of tag in list
+q=q.filter(sum(F.col(tag) for tag in newColumns[5:])>0)
+
+
+#checking whether dummies created or not
+q.show()
+q.printSchema()
+
+
+#caching the main Data Frame to be used for aggregations later and creating view
+q.cache()
+q.createOrReplaceTempView('questions_filtered')
+
+#summary statistics for overall count of all tags, trends and averages
+
+
+#Total number of questions asked
+print('Calculating total count of questions for these tags')
+print(q.count())
+print('Count of unique owners answering datascience questions')
+spark.sql('SELECT count(distinct owner_user_id) from questions_filtered').show()
+
+#Total count of views for each tag
+tag_count={}
+for tag in newColumns[5:]:
+        tag_count[tag]=spark.sql('SELECT sum(view_count),count(*) FROM questions_filtered WHERE '+tag+'=1 GROUP BY '+tag).show()
+        print(tag, tag_count[tag])
+
+#Calculating averages for certain charecteristics
+print('average view count and average answer count per question')
+q.select(F.avg("view_count")).show()
+q.select(F.avg("answer_count")).show()
+		
+#Getting the trends for all the tags over time
+s=''
+for i in newColumns[5:]:
+    s=s+'SUM('+i+'),'
+s=s[:-1]    
+q1='SELECT YEAR(creation_date),MONTH(creation_date),SUM(answer_count),SUM(view_count),COUNT(DISTINCT owner_user_id),COUNT(*),'+s+' FROM questions_filtered GROUP BY YEAR(creation_date),MONTH(creation_date)'
+trends=spark.sql(q1)
+#Writing the aggregated dataframe in HDFS
+trends.repartition(1).write.format('com.databricks.spark.csv').save('trends',header='true')
+
+#K means clustering in the question list
+random.seed(42)
+assembler=VectorAssembler(inputCols=newColumns[5:],outputCol='features')
+assembler.transform(q)
+
+#k=7 optimally found previously by iterating through k=3 to k=10 and getting the max silhouette value 
+kmeans_estimator=KMeans().setFeaturesCol("features").setK(6).setSeed(1)
+
+#Created Pipeline in-case further pre-processing needs to be added in later stages
+pipeline=Pipeline(stages=[assembler,kmeans_estimator])
+model=pipeline.fit(q)
+
+prediction=model.transform(q)
+prediction.createOrReplaceTempView("prediction")
+kmeans=spark.sql('SELECT prediction,YEAR(creation_date),MONTH(creation_date),COUNT(*),'+s+' FROM prediction GROUP BY prediction,YEAR(creation_date),MONTH(creation_date)')
+
+#Writing K-means aggregated data into HDFS
+kmeans.repartition(1).write.format('com.databricks.spark.csv').save('kmeans',header='true')
+
+#Evaluating the accuracy of our K-means model
+evaluator = ClusteringEvaluator()
+
+silhouette = evaluator.evaluate(prediction)
+print("Silhouette with squared euclidean distance = " + str(silhouette))
+
+
+'''Transfering files from Spark to Local to Cloud bucket
+hadoop fs -copyToLocal hdfs://ashwingcptraining@cluster-ae41-m/user/ashwingcptraining/kmeans.csv /home/ashwingcptraining/kmeans.csv
+gsutil cp /home/ashwingcptraining/spark1000.csv/* gs://stack-overflow-question-sample/
+
+To run the Spark code on VM Shell
+spark-submit --jars gs://spark-lib/bigquery/spark-bigquery-latest.jar test.py
+'''
+
+
